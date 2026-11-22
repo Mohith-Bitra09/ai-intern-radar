@@ -1,0 +1,8 @@
+google-genai>=3.6.1
+python-dotenv>=1.2.4
+requests>=2.32.0
+python-jobspy>=1.5.0
+feedparser>=6.0.11
+beautifulsoup4>=4.12.3
+pandas>=2.1.2
+curl-cffi>=0.16.2
