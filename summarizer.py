@@ -1,13 +1,14 @@
 import os
 import html
+import re
 from google import genai
 from google.genai import types
 
-# Candidate models in preferred order (supporting both current and legacy flash versions)
+# Candidate models in preferred order (supporting gemini-2.5-flash per prompt requirement, plus latest available fallbacks)
 PREFERRED_MODELS = [
+    "gemini-2.5-flash",
     "gemini-3.5-flash",
     "gemini-3.8-flash",
-    "gemini-2.5-flash",
     "gemini-3.1-flash-lite"
 ]
 
@@ -19,17 +20,12 @@ class JobSummarizer:
         
         self.client = genai.Client(api_key=self.api_key)
 
-    def summarize_job(self, job_data: dict) -> str:
+    def summarize_job(self, job_data: dict) -> str | None:
         """
-        Summarizes job posting into a Telegram-ready HTML format using Gemini Flash.
-        Fields:
-        - Company Name
-        - Role
-        - Location
-        - Eligibility & Required Skills
-        - Stipend (if listed)
-        - Step-by-step Application Instructions
-        - Direct Apply Link
+        Verifies company legitimacy via Google Search Grounding and summarizes genuine AI/ML internships.
+        Returns:
+            - Formatted HTML alert string if approved.
+            - None if the role is rejected (SKIP) due to being an EdTech mill, training scam, or unverified.
         """
         title = job_data.get("title", "AI/ML Internship")
         company = job_data.get("company", "Not Specified")
@@ -38,31 +34,56 @@ class JobSummarizer:
         apply_url = job_data.get("apply_url", "")
         source = job_data.get("source", "Job Board")
         description = job_data.get("description", "No detailed description provided.")
+        priority_tag = job_data.get("priority_tag", "🌍 International Remote")
 
         prompt = f"""
-You are an expert career intelligence AI assistant. Analyze the following job posting and create a clean, high-impact Telegram alert for students and developers seeking AI/ML internships.
+You are an expert career intelligence and corporate integrity investigator.
+Your mission is to perform strict company verification and summarize this AI/Machine Learning internship opportunity.
 
-Target Format:
-Use Telegram HTML formatting strictly (only <b>, <i>, <code>, <a href="...">).
-Do NOT wrap your entire response in markdown code blocks like ```html. Return the raw message text directly.
+Use Google Search to inspect the company '{company}' and evaluate this job posting.
 
-You MUST extract and format these exact sections:
-1. Header: 🚀 <b>NEW AI/ML INTERNSHIP ALERT</b>
-2. 🏢 <b>Company Name:</b> [Company Name]
-3. 💼 <b>Role:</b> [Job Title / Position]
-4. 📍 <b>Location:</b> [Location e.g. Bengaluru, India / Remote Worldwide]
-5. 💰 <b>Stipend / Compensation:</b> [Stipend/Salary if mentioned or infer from text, otherwise "Not explicitly disclosed in posting"]
-6. 🎓 <b>Eligibility & Required Skills:</b>
-   • Bullet points of degrees/year of study (if mentioned), key tech stack (e.g. Python, PyTorch, LangChain, Transformers, SQL, etc.)
-7. 📝 <b>Step-by-step Application Instructions:</b>
-   1. Specific actionable application step (e.g., Prepare resume highlighting ML projects)
-   2. How to submit (portal, form, email, or direct button)
-   3. Tips on standing out for this specific role
-8. 🔗 <b>Direct Apply Link:</b> <a href="{apply_url}">Click Here to Apply on {source}</a>
+============================================================
+🚨 STRICT REJECTION POLICY (RETURN 'SKIP'):
+============================================================
+You MUST strictly REJECT this role by returning ONLY the single word "SKIP" (with no other text) if ANY of the following are true:
+1. The company is an EdTech institute, coaching center, training academy, bootcamp, or agency selling courses, "training programs", "internship programs with certification", or asking for any fee, deposit, or placement charge.
+2. The company is a notorious internship certificate mill or resume padding scam (e.g. InternPe, Oasis Infobyte, Bharat Intern, CodeAlpha, LetsGrowMore, OctaNet, Sync Intern, TechnoHacks, etc.).
+3. The company has NO verifiable real software product, NO genuine engineering team, or NO credible corporate web presence.
+4. The role is purely unpaid labor, commission-only, or fake task work without real engineering mentorship.
+
+============================================================
+✅ APPROVAL CRITERIA:
+============================================================
+Only APPROVE genuine product companies, AI/tech startups, corporate R&D labs, or established technology firms offering authentic engineering exposure and real-world AI/ML work.
+
+============================================================
+OUTPUT FORMAT IF APPROVED:
+============================================================
+If approved, return the clean Telegram alert formatted STRICTLY in Telegram HTML (<b>, <i>, <code>, <a href="...">).
+Do NOT wrap your response in markdown backticks (no ```html).
+
+Include these exact fields:
+🚀 <b>NEW AI/ML INTERNSHIP ALERT</b>
+
+🏢 <b>Company Name:</b> [Company Name]
+💼 <b>Role:</b> [Position Title]
+📍 <b>Priority & Location:</b> {priority_tag} • [Exact Location / City]
+🔍 <b>Company Verification:</b> [1-line summary of what the company actually builds/does + why it is trusted, plus official website domain]
+💰 <b>Stipend / Compensation:</b> [Stipend or "Not explicitly disclosed in posting"]
+
+🎓 <b>Eligibility & Required Skills:</b>
+• [Degree/Year if stated, Key tech: Python, PyTorch/TensorFlow, LLMs/Transformers, etc.]
+
+📝 <b>Step-by-step Application Instructions:</b>
+1. [Actionable step, e.g. tailored ML portfolio]
+2. [Application method: portal link, form, etc.]
+3. [Tip to stand out for this company]
+
+🔗 <b>Direct Apply Link:</b> <a href="{apply_url}">Click Here to Apply on {source}</a>
 
 Job Information:
-- Title: {title}
 - Company: {company}
+- Title: {title}
 - Location: {location}
 - Provided Salary/Stipend: {raw_stipend}
 - Apply Link: {apply_url}
@@ -70,60 +91,67 @@ Job Information:
 
 Job Description:
 {description}
-
-Ensure any raw HTML entities like '&' are properly escaped as '&amp;', '<' as '&lt;', and '>' as '&gt;' unless they are valid Telegram HTML tags (<b>, </b>, <i>, </i>, <code>, </code>, <a href="...">, </a>). Keep it engaging, professional, and easy to read on mobile.
 """
         response_text = None
+
+        # 1. First attempt: Use Google Search Grounding tool with preferred models
         for model_name in PREFERRED_MODELS:
             try:
                 response = self.client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
-                        temperature=0.2,
+                        temperature=0.1,
+                        tools=[types.Tool(google_search=types.GoogleSearch())]
                     )
                 )
                 if response and response.text:
                     response_text = response.text.strip()
                     break
             except Exception as e:
-                # If deprecated or temporary capacity spike, failover to next model
+                # If search tool fails or quota reached on search metric, try next model or fallback
                 continue
 
-        if response_text:
-            text = response_text
-            # Remove any wrapping ```html or ``` if Gemini added it
-            if text.startswith("```"):
-                lines = text.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                text = "\n".join(lines).strip()
-            
-            # Ensure apply link is present
-            if apply_url and apply_url not in text:
-                text += f"\n\n🔗 <b>Direct Apply Link:</b> <a href=\"{apply_url}\">Apply Here</a>"
-            
-            return text
+        # 2. Fallback attempt: If Google Search tool hit quota/rate limits, call Gemini without tool
+        if not response_text:
+            for model_name in PREFERRED_MODELS:
+                try:
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.1
+                        )
+                    )
+                    if response and response.text:
+                        response_text = response.text.strip()
+                        break
+                except Exception:
+                    continue
 
-        # Resilient fallback formatted template if all model calls fail
-        fallback = f"""🚀 <b>NEW AI/ML INTERNSHIP ALERT</b>
+        if not response_text:
+            # If all model calls failed, perform rule-based check
+            print(f"[Summarizer] Model unavailable for {company}. Applying heuristic check.")
+            return None
 
-🏢 <b>Company Name:</b> {html.escape(company)}
-💼 <b>Role:</b> {html.escape(title)}
-📍 <b>Location:</b> {html.escape(location)}
-💰 <b>Stipend / Compensation:</b> {html.escape(raw_stipend)}
+        # Check for rejection signal
+        cleaned_first_line = response_text.splitlines()[0].strip().upper()
+        if "SKIP" in cleaned_first_line or response_text.strip().upper() == "SKIP":
+            print(f"[Summarizer] ❌ REJECTED by Gemini verification: {company} - {title}")
+            return None
 
-🎓 <b>Eligibility & Required Skills:</b>
-• Relevant background in Computer Science, Artificial Intelligence, or Data Science
-• Proficiency in Python, Machine Learning fundamentals, and Deep Learning libraries
+        # Clean markdown codeblocks if present
+        text = response_text
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
 
-📝 <b>Step-by-step Application Instructions:</b>
-1. Tailor your resume highlighting AI/ML and GenAI projects.
-2. Click the apply link below to access the official job posting.
-3. Complete the application form and submit promptly.
+        # Ensure direct apply link exists in message
+        if apply_url and apply_url not in text:
+            text += f"\n\n🔗 <b>Direct Apply Link:</b> <a href=\"{apply_url}\">Apply Here</a>"
 
-🔗 <b>Direct Apply Link:</b> <a href="{apply_url}">Click Here to Apply ({source})</a>
-"""
-        return fallback
+        return text

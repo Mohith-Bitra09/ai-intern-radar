@@ -31,13 +31,32 @@ AI_KEYWORDS = [
     r"\bdata science intern\b", r"\bdata scientist intern\b", r"\bprompt engineer\b"
 ]
 
+# Pre-filter keywords for fake, pay-to-intern, or course-selling mills
+SPAM_EDTECH_PATTERNS = [
+    r"training program", r"registration fee", r"pay after placement",
+    r"certification course", r"stipend based on performance", r"unpaid training",
+    r"course fee", r"training cum internship", r"training \+ internship",
+    r"internship with training", r"pay to intern", r"enrollment fee",
+    r"processing fee", r"security deposit", r"guaranteed placement",
+    r"placement guarantee", r"pay for certificate", r"certificate fee",
+    r"pay to work", r"internship program with training"
+]
+
+# Known notorious EdTech certificate mills / spam internship providers
+KNOWN_EDTECH_MILLS = [
+    r"\binternpe\b", r"\boasis infobyte\b", r"\bbharat intern\b", r"\bcodealpha\b",
+    r"\bletsgrowmore\b", r"\boctanet\b", r"\bsync intern\b", r"\btechnohacks\b",
+    r"\bvaultofcodes\b", r"\bslash mark\b", r"\bsuven\b", r"\bcodsoft\b",
+    r"\binterncareer\b", r"\bthe sparks foundation\b", r"\btutort\b",
+    r"\bverzeo\b", r"\bmycaptain\b"
+]
+
 def clean_html(raw_html: str) -> str:
     """Strip HTML tags and convert to clean text."""
     if not raw_html:
         return ""
     soup = BeautifulSoup(raw_html, "html.parser")
     text = soup.get_text(separator="\n")
-    # clean extra whitespace
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 def matches_ai_internship(title: str, description: str = "") -> bool:
@@ -56,28 +75,81 @@ def matches_ai_internship(title: str, description: str = "") -> bool:
              any(re.search(pat, combined) for pat in AI_KEYWORDS)
     return has_ai
 
-def is_india_or_remote(location: str, is_remote_flag: bool = False) -> bool:
-    """Check if location is in India or remote."""
-    if is_remote_flag:
-        return True
-    if not location:
-        return True # Default to allow if unspecified
-    loc_lower = location.lower()
-    india_indicators = [
-        "india", "bangalore", "bengaluru", "hyderabad", "pune", "mumbai",
-        "delhi", "gurgaon", "gurugram", "noida", "chennai", "kolkata",
-        "ahmedabad", "kerala", "kochi", "coimbatore"
-    ]
-    remote_indicators = ["remote", "anywhere", "worldwide", "global", "telecommute", "work from home", "wfh"]
-    
-    return any(ind in loc_lower for ind in india_indicators) or any(ind in loc_lower for ind in remote_indicators)
+def is_spam_or_edtech(company: str, title: str, description: str = "") -> tuple[bool, str]:
+    """
+    Pre-filter check to detect and drop spam, course-selling, or pay-to-intern listings.
+    Returns (is_spam, reason).
+    """
+    company_lower = (company or "").lower()
+    title_lower = (title or "").lower()
+    desc_lower = (description or "").lower()
+    combined = f"{title_lower} {company_lower} {desc_lower}"
+
+    # Check known fake training mills
+    for mill in KNOWN_EDTECH_MILLS:
+        if re.search(mill, company_lower) or re.search(mill, title_lower):
+            return True, f"Known certificate/training mill: {company}"
+
+    # Check spam and pay-to-intern keywords
+    for pattern in SPAM_EDTECH_PATTERNS:
+        if re.search(pattern, combined):
+            return True, f"Matched spam/pay-to-intern indicator: '{pattern}'"
+
+    return False, ""
+
+def classify_and_filter_location(location: str, is_remote: bool, source: str = "") -> tuple[bool, str, str, int]:
+    """
+    Classifies location based on strict user priorities:
+    1. Priority 1 (Highest):
+       - International Remote (Global, US/Europe remote open to international interns) -> Rank 1
+       - India Remote -> Rank 1
+    2. Priority 2:
+       - Onsite/Hybrid in Hyderabad, Bengaluru (Bangalore), Chennai -> Rank 2
+    3. Drop all other cities immediately unless explicitly Remote -> Rank 999 (is_allowed = False)
+
+    Returns: (is_allowed, priority_tag, priority_category, priority_rank)
+    """
+    loc_clean = (location or "").strip()
+    loc_lower = loc_clean.lower()
+
+    # 1. Check if role is Remote
+    is_remote_role = (
+        is_remote or
+        any(term in loc_lower for term in [
+            "remote", "anywhere", "worldwide", "global", "telecommute",
+            "work from home", "wfh", "virtual"
+        ]) or
+        any(board in source.lower() for board in ["remotive", "jobicy", "weworkremotely"])
+    )
+
+    if is_remote_role:
+        is_india_remote = (
+            "india" in loc_lower or
+            "bengaluru" in loc_lower or "bangalore" in loc_lower or
+            "hyderabad" in loc_lower or "chennai" in loc_lower or
+            "delhi" in loc_lower or "mumbai" in loc_lower or "pune" in loc_lower
+        )
+        if is_india_remote:
+            return True, "🏠 India Remote", "INDIA_REMOTE", 1
+        else:
+            return True, "🌍 International Remote", "INTERNATIONAL_REMOTE", 1
+
+    # 2. Check for Priority 2 Onsite/Hybrid Target Cities (Hyderabad, Bengaluru, Chennai)
+    if any(b in loc_lower for b in ["bengaluru", "bangalore"]):
+        return True, "📍 Bengaluru", "TARGET_CITY", 2
+    if any(h in loc_lower for h in ["hyderabad", "secunderabad", "cyberabad"]):
+        return True, "📍 Hyderabad", "TARGET_CITY", 2
+    if any(c in loc_lower for c in ["chennai", "madras"]):
+        return True, "📍 Chennai", "TARGET_CITY", 2
+
+    # 3. Disallowed: Onsite/Hybrid in non-target cities (e.g. Pune, Mumbai, Delhi, Gurgaon, Noida, etc.)
+    return False, "Non-Target Location", "DISALLOWED", 999
 
 def parse_iso_or_rfc(date_str: str) -> datetime | None:
     """Attempt parsing multiple date formats into timezone-aware datetime."""
     if not date_str:
         return None
     try:
-        # e.g., '2026-11-22T08:00:00Z' or with offset
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -85,7 +157,6 @@ def parse_iso_or_rfc(date_str: str) -> datetime | None:
     except Exception:
         pass
 
-    # Try common formats
     for fmt in (
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S %Z",
@@ -102,46 +173,46 @@ def parse_iso_or_rfc(date_str: str) -> datetime | None:
     return None
 
 def scrape_jobspy_jobs(hours_old: int = 24) -> list[dict]:
-    """Scrape AI/ML internships using python-jobspy across LinkedIn, Indeed, Glassdoor, and Google."""
+    """Scrape AI/ML internships using python-jobspy across Indeed & Glassdoor."""
     if not JOBSPY_AVAILABLE:
         return []
 
     jobs = []
-    # Search configurations:
-    # 1. India specific AI & ML internships
-    # 2. Remote AI & ML internships
+    # Streamlined high-speed search configs:
+    # 1. India (covers Bengaluru, Hyderabad, Chennai, and India Remote)
+    # 2. Remote (covers International Remote)
     configs = [
         {
-            "site_name": ["linkedin", "indeed", "glassdoor", "google"],
+            "site_name": ["indeed", "glassdoor"],
             "search_term": "Machine Learning Intern",
             "location": "India",
             "country_indeed": "india",
             "is_remote": False,
-            "results_wanted": 10,
+            "results_wanted": 15,
         },
         {
-            "site_name": ["linkedin", "indeed", "glassdoor", "google"],
+            "site_name": ["indeed", "glassdoor"],
             "search_term": "AI Intern",
             "location": "India",
             "country_indeed": "india",
             "is_remote": False,
-            "results_wanted": 10,
+            "results_wanted": 15,
         },
         {
-            "site_name": ["linkedin", "indeed", "glassdoor", "google"],
+            "site_name": ["indeed", "glassdoor"],
             "search_term": "Machine Learning Intern",
             "location": "Remote",
             "country_indeed": "usa",
             "is_remote": True,
-            "results_wanted": 10,
+            "results_wanted": 15,
         },
         {
-            "site_name": ["linkedin", "indeed", "glassdoor", "google"],
+            "site_name": ["indeed", "glassdoor"],
             "search_term": "AI Intern",
             "location": "Remote",
             "country_indeed": "usa",
             "is_remote": True,
-            "results_wanted": 10,
+            "results_wanted": 15,
         }
     ]
 
@@ -153,7 +224,7 @@ def scrape_jobspy_jobs(hours_old: int = 24) -> list[dict]:
                 search_term=cfg["search_term"],
                 location=cfg.get("location"),
                 is_remote=cfg.get("is_remote", False),
-                country_indeed=cfg.get("country_indeed", "usa"),
+                country_indeed=cfg.get("country_indeed", "india"),
                 results_wanted=cfg["results_wanted"],
                 hours_old=hours_old,
                 fetch_description=True,
@@ -175,7 +246,15 @@ def scrape_jobspy_jobs(hours_old: int = 24) -> list[dict]:
                 if not job_url or not title:
                     continue
 
-                if not is_india_or_remote(location, is_remote):
+                # 1. Location & Priority Filter (Drop other cities immediately)
+                is_allowed, tag, category, rank = classify_and_filter_location(location, is_remote, site)
+                if not is_allowed:
+                    continue
+
+                # 2. Spam / EdTech Pre-filter
+                is_spam, reason = is_spam_or_edtech(company, title, description)
+                if is_spam:
+                    print(f"   [Pre-Filter] 🚫 Dropped training/spam listing: {company} - {title} ({reason})")
                     continue
 
                 # Salary format
@@ -192,16 +271,19 @@ def scrape_jobspy_jobs(hours_old: int = 24) -> list[dict]:
                 jobs.append({
                     "title": title,
                     "company": company,
-                    "location": location or ("Remote" if is_remote else "India / Remote"),
+                    "location": location or ("Remote" if is_remote else "Bengaluru / Hyderabad / Chennai"),
                     "apply_url": job_url,
-                    "description": description[:3500], # Keep concise for LLM context
+                    "description": description[:3500],
                     "stipend": salary_str or "Not specified",
                     "date_posted": str(row.get("date_posted", "Recently")),
                     "is_remote": is_remote,
+                    "priority_tag": tag,
+                    "priority_category": category,
+                    "priority_rank": rank,
                     "source": f"JobSpy ({site.capitalize()})"
                 })
         except Exception as e:
-            print(f"[JobSpy] Search failed for {cfg['search_term']}: {e}")
+            print(f"[JobSpy] Search error for {cfg['search_term']} in {cfg.get('location')}: {e}")
 
     return jobs
 
@@ -230,26 +312,35 @@ def scrape_remotive_jobs(hours_old: int = 24) -> list[dict]:
                 pub_date_str = item.get("publication_date", "")
                 pub_date = parse_iso_or_rfc(pub_date_str)
 
-                # Filter within timeframe if date is available
                 if pub_date and pub_date < cutoff_time:
                     continue
 
                 if not matches_ai_internship(title, desc_text):
                     continue
 
+                company = item.get("company_name", "Unknown")
+                is_spam, reason = is_spam_or_edtech(company, title, desc_text)
+                if is_spam:
+                    print(f"   [Pre-Filter] 🚫 Dropped training/spam: {company} - {title} ({reason})")
+                    continue
+
                 location = item.get("candidate_required_location", "Remote Worldwide")
-                if not is_india_or_remote(location, True):
+                is_allowed, tag, category, rank = classify_and_filter_location(location, True, "Remotive")
+                if not is_allowed:
                     continue
 
                 jobs.append({
                     "title": title,
-                    "company": item.get("company_name", "Unknown"),
+                    "company": company,
                     "location": location,
                     "apply_url": item.get("url", ""),
                     "description": desc_text[:3500],
                     "stipend": item.get("salary", "") or "Not specified",
                     "date_posted": pub_date_str[:10] if pub_date_str else "Recently",
                     "is_remote": True,
+                    "priority_tag": tag,
+                    "priority_category": category,
+                    "priority_rank": rank,
                     "source": "Remotive"
                 })
         except Exception as e:
@@ -285,7 +376,17 @@ def scrape_jobicy_jobs(hours_old: int = 24) -> list[dict]:
                 if not matches_ai_internship(title, desc_text):
                     continue
 
+                company = item.get("companyName", "Unknown")
+                is_spam, reason = is_spam_or_edtech(company, title, desc_text)
+                if is_spam:
+                    print(f"   [Pre-Filter] 🚫 Dropped training/spam: {company} - {title} ({reason})")
+                    continue
+
                 location = item.get("jobGeo", "Remote")
+                is_allowed, tag, category, rank = classify_and_filter_location(location, True, "Jobicy")
+                if not is_allowed:
+                    continue
+
                 salary_str = ""
                 min_sal = item.get("annualSalaryMin")
                 max_sal = item.get("annualSalaryMax")
@@ -297,13 +398,16 @@ def scrape_jobicy_jobs(hours_old: int = 24) -> list[dict]:
 
                 jobs.append({
                     "title": title,
-                    "company": item.get("companyName", "Unknown"),
+                    "company": company,
                     "location": location,
                     "apply_url": item.get("url", ""),
                     "description": desc_text[:3500],
                     "stipend": salary_str or "Not specified",
                     "date_posted": pub_date_str[:10] if pub_date_str else "Recently",
                     "is_remote": True,
+                    "priority_tag": tag,
+                    "priority_category": category,
+                    "priority_rank": rank,
                     "source": "Jobicy"
                 })
         except Exception as e:
@@ -340,7 +444,6 @@ def scrape_weworkremotely_rss(hours_old: int = 24) -> list[dict]:
                 if not matches_ai_internship(title, summary_text):
                     continue
 
-                # WWR titles usually look like "Company: Role"
                 company = "Unknown"
                 role_title = title
                 if ":" in title:
@@ -348,15 +451,27 @@ def scrape_weworkremotely_rss(hours_old: int = 24) -> list[dict]:
                     company = parts[0].strip()
                     role_title = parts[1].strip()
 
+                is_spam, reason = is_spam_or_edtech(company, role_title, summary_text)
+                if is_spam:
+                    print(f"   [Pre-Filter] 🚫 Dropped training/spam: {company} - {role_title} ({reason})")
+                    continue
+
+                is_allowed, tag, category, rank = classify_and_filter_location("Remote Worldwide", True, "WeWorkRemotely")
+                if not is_allowed:
+                    continue
+
                 jobs.append({
                     "title": role_title,
                     "company": company,
-                    "location": "Remote",
+                    "location": "Remote Worldwide",
                     "apply_url": link,
                     "description": summary_text[:3500],
                     "stipend": "Not specified",
                     "date_posted": pub_dt.strftime("%Y-%m-%d") if pub_dt else "Recently",
                     "is_remote": True,
+                    "priority_tag": tag,
+                    "priority_category": category,
+                    "priority_rank": rank,
                     "source": "WeWorkRemotely"
                 })
         except Exception as e:
@@ -367,13 +482,16 @@ def scrape_weworkremotely_rss(hours_old: int = 24) -> list[dict]:
 def fetch_all_ai_internships(hours_old: int = 24) -> list[dict]:
     """
     Aggregate AI/ML internships from python-jobspy and public feeds posted in the last 24 hours.
-    Deduplicates within the current batch.
+    Prioritizes:
+    - Priority 1: Remote India & International Remote
+    - Priority 2: Hyderabad, Bengaluru, Chennai
+    Filters out spam, fake EdTech certificate mills, and non-target locations.
     """
     all_jobs = []
 
-    print("[Scraper] 1/4 Fetching from JobSpy (LinkedIn, Indeed, Glassdoor, Google)...")
+    print("[Scraper] 1/4 Fetching from JobSpy (Indeed, Glassdoor)...")
     jobspy_jobs = scrape_jobspy_jobs(hours_old=hours_old)
-    print(f"[Scraper] JobSpy found: {len(jobspy_jobs)} candidate jobs.")
+    print(f"[Scraper] JobSpy found: {len(jobspy_jobs)} candidate jobs matching target criteria.")
     all_jobs.extend(jobspy_jobs)
 
     print("[Scraper] 2/4 Fetching from Remotive public API...")
@@ -408,5 +526,5 @@ def fetch_all_ai_internships(hours_old: int = 24) -> list[dict]:
         seen_in_batch.add(key)
         unique_jobs.append(j)
 
-    print(f"[Scraper] Total unique candidate jobs collected: {len(unique_jobs)}")
+    print(f"[Scraper] Total verified candidate jobs matching location & pre-filter: {len(unique_jobs)}")
     return unique_jobs

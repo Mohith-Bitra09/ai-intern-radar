@@ -35,10 +35,10 @@ def check_environment() -> tuple[bool, str]:
     return True, ""
 
 def run_agent(hours_old: int = 24, max_alerts: int = 10, dry_run: bool = False, test_mode: bool = False):
-    """Main execution loop for AI Intern Radar."""
-    print("=" * 65)
-    print("🛰️  AI INTERN RADAR - Automated Job Intelligence Agent")
-    print("=" * 65)
+    """Main execution loop for AI Intern Radar with Location Prioritization and Scam Filtering."""
+    print("=" * 70)
+    print("🛰️  AI INTERN RADAR - Verified Intelligence & Location-Priority Agent")
+    print("=" * 70)
 
     is_valid, err_msg = check_environment()
     if not is_valid:
@@ -60,12 +60,16 @@ def run_agent(hours_old: int = 24, max_alerts: int = 10, dry_run: bool = False, 
             print("❌ Failed to send test message. Check your Bot Token and Chat ID.")
         return
 
-    # Fetch jobs
-    print(f"\n[Scraper] Searching for AI/ML internships posted in the last {hours_old} hours (India & Remote)...")
+    # 1. Fetch filtered candidate jobs (with location priority and spam pre-filter)
+    print(f"\n[Scraper] Searching for AI/ML internships posted in the last {hours_old} hours...")
+    print("   Priority 1: International Remote & India Remote")
+    print("   Priority 2: Onsite/Hybrid in Bengaluru, Hyderabad, Chennai")
+    print("   Filtering: Dropping all other cities & pre-filtering EdTech training scams...")
+
     candidate_jobs = fetch_all_ai_internships(hours_old=hours_old)
     print(f"[Scraper] Discovered {len(candidate_jobs)} total candidate internships.")
 
-    # Filter unseen jobs
+    # 2. Filter unseen jobs
     new_jobs = []
     for job in candidate_jobs:
         apply_url = job.get("apply_url", "")
@@ -80,28 +84,55 @@ def run_agent(hours_old: int = 24, max_alerts: int = 10, dry_run: bool = False, 
         print("\n✨ All current jobs have already been seen or no new postings in the last 24h. Up to date!")
         return
 
-    # Limit jobs per run to prevent flood
-    jobs_to_process = new_jobs[:max_alerts]
-    print(f"[Processing] Preparing alerts for {len(jobs_to_process)} new postings (limit: {max_alerts})...\n")
+    # 3. Sort by User Location Priority:
+    # Rank 1: International Remote & India Remote first
+    # Rank 2: Hyderabad, Bengaluru, Chennai next
+    new_jobs.sort(key=lambda j: j.get("priority_rank", 999))
+
+    remote_count = sum(1 for j in new_jobs if j.get("priority_rank") == 1)
+    target_city_count = sum(1 for j in new_jobs if j.get("priority_rank") == 2)
+    print(f"[Priority Sorting] Queue ordered: {remote_count} Remote roles (Priority 1) -> {target_city_count} Target City roles (Priority 2).")
 
     sent_count = 0
-    for idx, job in enumerate(jobs_to_process, 1):
+    rejected_count = 0
+    processed_count = 0
+
+    for idx, job in enumerate(new_jobs, 1):
+        if sent_count >= max_alerts:
+            print(f"[Limit] Reached maximum alert limit ({max_alerts}) for this run.")
+            break
+
         company = job.get("company", "Unknown")
         title = job.get("title", "AI/ML Intern")
         apply_url = job.get("apply_url")
-        print(f"[{idx}/{len(jobs_to_process)}] Summarizing with Gemini 2.5 Flash: {company} - {title}...")
+        tag = job.get("priority_tag", "")
+        location = job.get("location", "")
 
-        # Generate summary using gemini-2.5-flash
+        processed_count += 1
+        print(f"\n[{processed_count}/{len(new_jobs)}] Evaluating: {company} - {title} [{tag} | {location}]")
+        print(f"   🔍 Verifying company legitimacy with Gemini...")
+
+        # Verify company and generate structured summary
         try:
             summary_message = summarizer.summarize_job(job)
         except Exception as e:
-            print(f"   ⚠️ Gemini summarization error: {e}")
+            print(f"   ⚠️ Gemini verification error: {e}")
             continue
 
+        if not summary_message:
+            # Company rejected as EdTech mill, fake training program, or unverified
+            print(f"   🚫 REJECTED: {company} identified as training mill/unverified. Excluding.")
+            tracker.add(apply_url)
+            tracker.save()
+            rejected_count += 1
+            continue
+
+        print(f"   ✅ APPROVED: {company} verified as genuine tech company!")
+
         if dry_run:
-            print(f"\n--- [DRY RUN - Message Preview] ---")
+            print(f"\n--- [DRY RUN - Approved Alert Preview] ---")
             print(summary_message)
-            print("------------------------------------\n")
+            print("------------------------------------------\n")
             tracker.add(apply_url)
             sent_count += 1
             continue
@@ -110,20 +141,21 @@ def run_agent(hours_old: int = 24, max_alerts: int = 10, dry_run: bool = False, 
         print(f"   📤 Sending alert to Telegram...")
         delivered = notifier.send_message(summary_message)
         if delivered:
-            print(f"   ✅ Alert delivered for {company} - {title}")
+            print(f"   ✅ Alert delivered to Telegram for {company} - {title}")
             tracker.add(apply_url)
             tracker.save()
             sent_count += 1
         else:
-            print(f"   ❌ Failed to send alert to Telegram.")
+            print(f"   ❌ Failed to deliver alert to Telegram.")
 
         # Rate limiting delay between messages
         time.sleep(1.5)
 
     tracker.save()
-    print("\n" + "=" * 65)
-    print(f"🏁 Run complete: {sent_count} alerts sent to Telegram. seen_jobs.json updated.")
-    print("=" * 65)
+    print("\n" + "=" * 70)
+    print(f"🏁 Run complete: {sent_count} approved alerts delivered, {rejected_count} scams rejected.")
+    print(f"   seen_jobs.json updated ({len(tracker.seen_urls)} total tracked URLs).")
+    print("=" * 70)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI & Machine Learning Internship Radar Agent")
